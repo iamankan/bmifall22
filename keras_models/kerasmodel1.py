@@ -9,6 +9,7 @@ import tensorflow as tf
 import imageio.v2 as iio2
 from sklearn import preprocessing
 import cv2
+import time
 
 from keras.utils.vis_utils import plot_model
 
@@ -46,8 +47,8 @@ def main():
 
     folder_name = f'../../../data/sars-cov2-ct-scan'
 
-    image_height = 128
-    image_width = 128
+    image_height = 227
+    image_width = 227
     num_of_channel = 1
     data_format_map = {'channels_first':(num_of_channel,image_width, image_height), 
                     'channels_last': (image_width, image_height, num_of_channel)}
@@ -55,28 +56,36 @@ def main():
     data_format='channels_first'
     
 
-    images_train, labels_train, images_test, labels_test, images_val, labels_val = load_image_data(folder_name=folder_name, image_height= image_height, image_width=image_width)
+    # images_train, labels_train, images_test, labels_test, images_val, labels_val = load_image_data(folder_name=folder_name, image_height= image_height, image_width=image_width)
+
+    images_train = np.load('images_train.npz.npy', allow_pickle=True)
+    labels_train = np.load('labels_train.npz.npy', allow_pickle=True)
+
+    images_val = np.load('images_val.npz.npy', allow_pickle=True)
+    labels_val = np.load('labels_val.npz.npy', allow_pickle=True)
+
 
     encoder = preprocessing.LabelEncoder().fit(['COVID', 'non-COVID'])
     bin_train_labels = encoder.transform(labels_train[0])
     bin_val_labels = encoder.transform(labels_val[0])
-    bin_test_labels = encoder.transform(labels_test[0])
 
 
     modelobj = Model(input_shape=data_format_map[data_format])
-    mymodel = modelobj.build(data_format=data_format)
+    mymodel = modelobj.build2(data_format=data_format)
     mymodel.summary()
 
-    plot_model(mymodel, to_file='model_plot.png', show_shapes=True, show_layer_names=True)
+    slno = time.time_ns()
 
-    mymodel.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=1e-3),
+    plot_model(mymodel, to_file=f'model_plot_{slno}.png', show_shapes=True, show_layer_names=True)
+
+    mymodel.compile(optimizer=tf.keras.optimizers.RMSprop(learning_rate=0.0001),
               loss=tf.keras.losses.BinaryCrossentropy(),
               metrics=[tf.keras.metrics.BinaryAccuracy()])
 
-    history = modelobj.train(epochs=10, compiled_model=mymodel, x= images_train, y= bin_train_labels, batch_size=12, validation_data=
-    (images_val, bin_val_labels))
+    history = modelobj.train(epochs=100, compiled_model=mymodel, x= images_train, y= bin_train_labels, batch_size=12, validation_data=
+    (images_val, bin_val_labels), save_path=f'model_{slno}')
 
-    modelobj.visualize_history(history = history)
+    modelobj.visualize_history(history = history, save_path=f'my_history_{slno}.npy')
 
     
 
@@ -89,12 +98,72 @@ class Model(tf.keras.Model):
         self.INPUT_SHAPE = input_shape
         self.input_layer = tf.keras.Input(self.INPUT_SHAPE, name='input_layer')
         self.keras_layers = tf.keras.layers
+    
+    def fire_module(self, layer, data_format, fire_id=0, squeeze=16, expand=64):
+        print(f'Fire module - {fire_id}')
+        if data_format == 'channels_first':
+            channel_axis = 1
+        else:
+            channel_axis = 3
+
+        name = f'fire_{fire_id}'
+
+        layer = self.keras_layers.Convolution2D(squeeze, (1,1), padding='valid', data_format=data_format, name=name+'_conv2d_1')(layer)
+        layer = self.keras_layers.Activation('elu', name=name+'_activation_1')(layer)
+
+        left = self.keras_layers.Convolution2D(expand, (1,1), padding='valid', data_format=data_format, name=name+'_conv2d_2_left')(layer)
+        left = self.keras_layers.Activation('elu', name=name+'_activation_2left')(left)
+
+        right = self.keras_layers.Convolution2D(expand, (1,1), padding='valid', data_format=data_format, name=name+'_conv2d_2_right')(layer)
+        right = self.keras_layers.Activation('elu', name=name+'_activation_2right')(right)
+
+        x = self.keras_layers.concatenate([left, right], axis=channel_axis, name=name+'_concar_fire')
+
+        return x
+
+    def build2(self, mode: str = 'binary', data_format: str='channels_last') -> tf.keras.Model:
+        print(f'Building model with keras API-2')
+        '''
+        https://github.com/rcmalli/keras-squeezenet/blob/master/keras_squeezenet/squeezenet.py
+        '''
+        
+        x = self.keras_layers.Convolution2D(64, (3, 3), strides=(2, 2), padding='valid', data_format=data_format, name='conv1')(self.input_layer)
+        x = self.keras_layers.Activation('elu', name='elu_conv1')(x)
+        x = self.keras_layers.MaxPooling2D(pool_size=(3, 3), strides=(2, 2), name='pool1')(x)
+
+        x = self.fire_module(x, fire_id=2, squeeze=16, expand=64, data_format=data_format)
+        x = self.fire_module(x, fire_id=3, squeeze=16, expand=64, data_format=data_format)
+        x = self.keras_layers.MaxPooling2D(pool_size=(3, 3), strides=(2, 2), name='pool3')(x)
+
+        x = self.fire_module(x, fire_id=4, squeeze=32, expand=128, data_format=data_format)
+        x = self.fire_module(x, fire_id=5, squeeze=32, expand=128, data_format=data_format)
+        x = self.keras_layers.MaxPooling2D(pool_size=(3, 3), strides=(2, 2), name='pool5')(x)
+
+        x = self.fire_module(x, fire_id=6, squeeze=48, expand=192, data_format=data_format)
+        x = self.fire_module(x, fire_id=7, squeeze=48, expand=192, data_format=data_format)
+        x = self.fire_module(x, fire_id=8, squeeze=64, expand=256, data_format=data_format)
+        x = self.fire_module(x, fire_id=9, squeeze=64, expand=256, data_format=data_format)
+
+        x = self.keras_layers.Dropout(0.5, name='drop9')(x)
+
+        x = self.keras_layers.Convolution2D(1000, (2,2), padding='valid', activation=tf.nn.elu, data_format=data_format, name='conv10')(x)
+        x = self.keras_layers.Activation('elu', name='relu_conv10')(x)
+        x = self.keras_layers.GlobalAveragePooling2D()(x)
+        # x = self.keras_layers.Activation('sigmoid', name='loss')(x)
+        x= self.keras_layers.Flatten(data_format=data_format)(x)
+        # x = self.keras_layers.Dense(4000, activation=tf.nn.elu, name='dense_4000_1')(x)
+        output = self.keras_layers.Dense(1, activation=tf.nn.sigmoid)(x)
+
+        return tf.keras.Model(self.input_layer, output)
 
     def build(self, mode: str = 'binary', data_format: str='channels_last') -> tf.keras.Model:
         print(f'Building model with keras API')
         # filters=512, kernel_size=3, strides=3, data_format=data_format, activation=tf.nn.relu, name='1st_convolution_layer'
-        self.conv1 = self.keras_layers.Conv2D(64, kernel_size =(3,3), strides =(2,2), data_format=data_format, activation=tf.nn.relu, name='1st_convolution_layer')
-        self.conv2 = self.keras_layers.Conv2D(32, kernel_size =(3,3), strides =(2,2), data_format=data_format, activation=tf.nn.relu, name='2nd_convolution_layer')
+        self.conv1 = self.keras_layers.Conv2D(128, kernel_size =(7,7), strides =(2,2), data_format=data_format, activation=tf.nn.relu, name='1st_convolution_layer')
+        self.conv2 = self.keras_layers.Conv2D(64, kernel_size =(7,7), strides =(2,2), data_format=data_format, activation=tf.nn.relu, name='2nd_convolution_layer')
+        self.conv3 = self.keras_layers.Conv2D(32, kernel_size =(7,7), strides =(2,2), data_format=data_format, activation=tf.nn.relu, name='3rd_convolution_layer')
+        self.conv4 = self.keras_layers.Conv2D(16, kernel_size =(7,7), strides =(2,2), data_format=data_format, activation=tf.nn.relu, name='4th_convolution_layer')
+        self.conv5 = self.keras_layers.Conv2D(8, kernel_size =(7,7), strides =(2,2), data_format=data_format, activation=tf.nn.relu, name='5th_convolution_layer')
         
         '''
             Args:
@@ -115,7 +184,7 @@ class Model(tf.keras.Model):
                 If data_format='channels_first': 4D tensor with shape (batch_size, channels, 1, 1)
         '''
         self.pool1 = self.keras_layers.MaxPooling2D(pool_size =(2,2), strides =(2, 2), data_format=data_format, name='1st_pooling_layer')
-        self.gpool1 = self.keras_layers.GlobalAveragePooling2D(data_format=data_format, name='1st_global_pooling_layer')
+        self.gpool1 = self.keras_layers.GlobalAveragePooling2D(data_format=data_format, keepdims=True, name='1st_global_pooling_layer')
         
         self.dense1 = self.keras_layers.Dense(4000, activation=tf.nn.relu, name='1st_dense_layer')
         self.dense2 = self.keras_layers.Dense(3000, activation=tf.nn.relu, name='2nd_dense_layer')
@@ -124,14 +193,21 @@ class Model(tf.keras.Model):
 
         # Starting to make the model
         x0 = self.conv1(self.input_layer)
-        x0 = self.pool1(x0)
+        # x0 = self.pool1(x0)
         x0 = self.conv2(x0)
-        x0 = self.gpool1(x0)
+        # x0 = self.pool1(x0)
+        x0 = self.conv3(x0)
+        # x0 = self.pool1(x0)
+        x0 = self.conv4(x0)
+        # x0 = self.pool1(x0)
+        # x0 = self.conv5(x0)
+
+        # x0 = self.gpool1(x0)
         x0_flat = self.keras_layers.Flatten()(x0)
         x0_flat = self.dense1(x0_flat)
-        x0_flat = self.keras_layers.Dropout(rate=0.3)(x0_flat)
+        x0_flat = self.keras_layers.Dropout(rate=0.5)(x0_flat)
         x0_flat = self.dense2(x0_flat)
-        x0_flat = self.keras_layers.Dropout(rate=0.1)(x0_flat)
+        x0_flat = self.keras_layers.Dropout(rate=0.3)(x0_flat)
         # x0_flat = self.dense3(x0_flat)
         # x0_flat = self.keras_layers.Dropout(rate=0.1)(x0_flat)
         output_layer = self.output_block(x0_flat)
@@ -149,11 +225,13 @@ class Model(tf.keras.Model):
         save_weight = tf.keras.callbacks.ModelCheckpoint(filepath=save_path+'/weight_{epoch:02d}.h5',
         save_weights_only=True)
 
+        lr_sched = tf.keras.callbacks.LearningRateScheduler(lambda epoch: 1e-3 * (0.80 ** np.floor(epoch / 2)))
+
         history = compiled_model.fit(x=x, y=y, batch_size=batch_size, validation_data=validation_data, epochs=epochs,
         callbacks=[save_model, save_weight])
         return history
 
-    def visualize_history(self, history) -> None:
+    def visualize_history(self, history, save_path: str= 'my_history_0.npy') -> None:
         # list all data in history
         print(history.history.keys())
 
@@ -167,6 +245,7 @@ class Model(tf.keras.Model):
         plt.xlabel('epoch')
         plt.legend(['train', 'test'], loc='upper left')
         plt.show()
+        plt.savefig('accuracy.png')
         # summarize history for loss
         plt.plot(history.history['loss'])
         plt.plot(history.history['val_loss'])
@@ -175,6 +254,9 @@ class Model(tf.keras.Model):
         plt.xlabel('epoch')
         plt.legend(['train', 'test'], loc='upper left')
         plt.show()
+        plt.savefig('loss.png')
+
+        np.save(save_path, history.history)
 
 
         
